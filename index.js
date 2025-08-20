@@ -135,7 +135,26 @@ app.post("/create-checkout-session", async (req, res) => {
   }
 });
 
-// Webhook para manejar pagos exitosos
+// Endpoint para verificar estado de pago
+app.get("/verify-payment/:sessionId", async (req, res) => {
+  try {
+    const { sessionId } = req.params;
+    const session = await stripe.checkout.sessions.retrieve(sessionId);
+
+    res.json({
+      status: session.payment_status,
+      levelId: session.metadata.levelId,
+      userId: session.metadata.userId,
+      amount: session.amount_total / 100,
+      currency: session.currency,
+    });
+  } catch (error) {
+    console.error("Error verifying payment:", error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Webhook mejorado con reintentos
 app.post(
   "/webhook",
   express.raw({ type: "application/json" }),
@@ -150,62 +169,110 @@ app.post(
         process.env.STRIPE_WEBHOOK_SECRET
       );
     } catch (err) {
-      console.error("Webhook signature verification failed:", err.message);
+      console.error("❌ Webhook signature verification failed:", err.message);
       return res.status(400).send(`Webhook Error: ${err.message}`);
     }
+
+    console.log(`✅ Webhook received: ${event.type}`);
 
     // Manejar el evento de checkout completado
     if (event.type === "checkout.session.completed") {
       const session = event.data.object;
 
       try {
-        // Actualizar el usuario en Firebase
+        // Verificar que el pago fue exitoso
+        if (session.payment_status !== "paid") {
+          console.log(`ℹ️ Payment not completed for session: ${session.id}`);
+          return res.json({ received: true, status: "not_paid" });
+        }
+
         const userId = session.metadata.userId;
         const levelId = session.metadata.levelId;
 
-        console.log(`🛒 Processing purchase for user ${userId}, level ${levelId}`);
+        console.log(
+          `🛒 Processing purchase for user ${userId}, level ${levelId}`
+        );
 
-        // Obtener el progress actual del usuario
+        // Obtener el usuario actual
         const userProgressRef = doc(db, "userProgress", userId);
         const userProgressSnap = await getDoc(userProgressRef);
 
         if (!userProgressSnap.exists()) {
-          console.error(`User progress not found for ${userId}`);
-          return res.status(404).json({ error: "User progress not found" });
+          console.error(`❌ User progress not found for ${userId}`);
+          return res.status(404).json({ error: "User not found" });
         }
 
         const userProgress = userProgressSnap.data();
-        const currentUnlockedLevels = userProgress.unlockedLevels || ["A1"];
 
-        // Verificar si el nivel ya está desbloqueado
-        if (currentUnlockedLevels.includes(levelId)) {
-          console.log(`ℹ️ Level ${levelId} already unlocked for user ${userId}`);
-          return res.json({ received: true, status: "already_unlocked" });
+        // Verificar si ya tiene el nivel
+        if (userProgress.purchasedLevels?.[levelId]) {
+          console.log(
+            `ℹ️ Level ${levelId} already purchased for user ${userId}`
+          );
+          return res.json({ received: true, status: "already_purchased" });
         }
 
-        // Agregar el nuevo nivel a los desbloqueados
-        const updatedUnlockedLevels = [...currentUnlockedLevels, levelId];
-
-        // Actualizar el documento del usuario
+        // Actualizar el usuario
         await updateDoc(userProgressRef, {
-          unlockedLevels: updatedUnlockedLevels,
-          lastPurchase: new Date(),
           [`purchasedLevels.${levelId}`]: true,
+          unlockedLevels: arrayUnion(levelId),
+          lastPurchase: new Date(),
         });
 
-        console.log(`✅ User ${userId} purchased level ${levelId} successfully`);
-        console.log(`🔓 Unlocked levels: ${updatedUnlockedLevels.join(', ')}`);
+        console.log(
+          `✅ Purchase completed: User ${userId} -> Level ${levelId}`
+        );
 
+        // Enviar email de confirmación (opcional)
+        try {
+          await sendPurchaseConfirmationEmail(
+            userId,
+            levelId,
+            session.amount_total / 100
+          );
+        } catch (emailError) {
+          console.error("Error sending email:", emailError);
+        }
       } catch (error) {
-        console.error("❌ Error updating user in Firebase:", error);
-        // Puedes decidir si quieres retornar error o solo loggear
-        return res.status(500).json({ error: "Failed to update user progress" });
+        console.error("❌ Error processing webhook:", error);
+
+        // Reintentar después de un delay
+        setTimeout(async () => {
+          try {
+            await retryFailedWebhook(event);
+          } catch (retryError) {
+            console.error("❌ Retry also failed:", retryError);
+          }
+        }, 5000);
+
+        return res.status(500).json({ error: "Failed to process webhook" });
       }
     }
 
     res.json({ received: true });
   }
 );
+
+// Función para reintentar webhooks fallidos
+async function retryFailedWebhook(event) {
+  console.log("🔄 Retrying failed webhook...");
+
+  if (event.type === "checkout.session.completed") {
+    const session = event.data.object;
+    const userId = session.metadata.userId;
+    const levelId = session.metadata.levelId;
+
+    const userProgressRef = doc(db, "userProgress", userId);
+
+    await updateDoc(userProgressRef, {
+      [`purchasedLevels.${levelId}`]: true,
+      unlockedLevels: arrayUnion(levelId),
+      lastPurchase: new Date(),
+    });
+
+    console.log("✅ Retry successful");
+  }
+}
 
 // Verificar si un usuario tiene un nivel comprado
 app.get("/check-level-access/:userId/:levelId", async (req, res) => {
@@ -216,18 +283,19 @@ app.get("/check-level-access/:userId/:levelId", async (req, res) => {
     const userProgressSnap = await getDoc(userProgressRef);
 
     if (!userProgressSnap.exists()) {
-      return res.status(404).json({ hasAccess: false, error: "User not found" });
+      return res
+        .status(404)
+        .json({ hasAccess: false, error: "User not found" });
     }
 
     const userProgress = userProgressSnap.data();
     const hasAccess = userProgress.unlockedLevels?.includes(levelId) || false;
 
-    res.json({ 
-      hasAccess, 
+    res.json({
+      hasAccess,
       unlockedLevels: userProgress.unlockedLevels || ["A1"],
-      purchasedLevels: userProgress.purchasedLevels || {}
+      purchasedLevels: userProgress.purchasedLevels || {},
     });
-
   } catch (error) {
     console.error("Error checking level access:", error);
     res.status(500).json({ error: error.message });
@@ -265,11 +333,10 @@ app.get("/check-level-access/:userId", async (req, res) => {
 
     const userProgress = userProgressSnap.data();
 
-    res.json({ 
+    res.json({
       unlockedLevels: userProgress.unlockedLevels || ["A1"],
-      purchasedLevels: userProgress.purchasedLevels || {}
+      purchasedLevels: userProgress.purchasedLevels || {},
     });
-
   } catch (error) {
     console.error("Error checking level access:", error);
     res.status(500).json({ error: error.message });

@@ -63,9 +63,9 @@ console.log("✅ Firebase Admin inicializado correctamente");
 
 // Precios de los niveles (deberían coincidir con tus productos en Stripe)
 const LEVEL_PRICES = {
-  A1: "prod_Su3iwdFH1FJb9L",
-  A2: "prod_Su3iGzaZ6c6zfE",
-  B1: "prod_Su3iVazX0H5eoe"
+  A1: "price_1RyFaaIlL7CBuxtZG47D4jKY",
+  A2: "price_1RyFb5IlL7CBuxtZUSHsM4fP",
+  B1: "price_1RyFbHIlL7CBuxtZz1GG0zhv",
 };
 
 // Crear sesión de checkout
@@ -81,12 +81,18 @@ app.post("/create-checkout-session", async (req, res) => {
 
     const priceId = LEVEL_PRICES[levelId];
     if (!priceId) {
-      return res.status(400).json({ error: `Invalid level ID: ${levelId}. Available levels: ${Object.keys(LEVEL_PRICES).join(', ')}` });
+      return res.status(400).json({
+        error: `Invalid level ID: ${levelId}. Available levels: ${Object.keys(
+          LEVEL_PRICES
+        ).join(", ")}`,
+      });
     }
 
-    // Verificar que la API key de Stripe esté configurada
-    if (!process.env.STRIPE_SECRET_KEY) {
-      throw new Error("Stripe secret key not configured");
+    // Verificar que el priceId sea válido (empiece con price_)
+    if (!priceId.startsWith("price_")) {
+      return res.status(400).json({
+        error: `Invalid price ID format for level ${levelId}. Expected 'price_xxx', got '${priceId}'`,
+      });
     }
 
     const session = await stripe.checkout.sessions.create({
@@ -98,7 +104,9 @@ app.post("/create-checkout-session", async (req, res) => {
         },
       ],
       mode: "payment",
-      success_url: successUrl || `${process.env.FRONTEND_URL}/payment-success?session_id={CHECKOUT_SESSION_ID}`,
+      success_url:
+        successUrl ||
+        `${process.env.FRONTEND_URL}/payment-success?session_id={CHECKOUT_SESSION_ID}`,
       cancel_url: cancelUrl || `${process.env.FRONTEND_URL}/payment-cancel`,
       metadata: {
         userId: userId,
@@ -106,15 +114,24 @@ app.post("/create-checkout-session", async (req, res) => {
       },
     });
 
-    console.log("Checkout session created:", session.id);
+    console.log("✅ Checkout session created:", session.id);
     res.json({ sessionId: session.id });
-
   } catch (error) {
-    console.error("Error creating checkout session:", error);
-    res.status(500).json({ 
-      error: error.message,
-      details: "Check Stripe configuration and product setup"
-    });
+    console.error("❌ Error creating checkout session:", error);
+
+    // Dar mejor feedback sobre el error
+    if (error.type === "StripeInvalidRequestError") {
+      res.status(400).json({
+        error: "Invalid Stripe request",
+        details: error.message,
+        suggestion: "Check if the price ID exists and is active in Stripe",
+      });
+    } else {
+      res.status(500).json({
+        error: error.message,
+        details: "Check Stripe configuration",
+      });
+    }
   }
 });
 

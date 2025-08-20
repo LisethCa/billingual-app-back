@@ -223,11 +223,17 @@ app.post(
         }
 
         // Actualizar el usuario
-        await updateDoc(userProgressRef, {
+        const updateData = {
           [`purchasedLevels.${levelId}`]: true,
-          unlockedLevels: arrayUnion(levelId),
           lastPurchase: new Date(),
-        });
+        };
+
+        // Solo agregar a unlockedLevels si no existe ya
+        if (!userProgress.unlockedLevels?.includes(levelId)) {
+          updateData.unlockedLevels = arrayUnion(levelId);
+        }
+
+        await updateDoc(userProgressRef, updateData);
 
         console.log(
           `✅ Purchase completed: User ${userId} -> Level ${levelId}`

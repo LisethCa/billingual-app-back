@@ -163,24 +163,76 @@ app.post(
         const userId = session.metadata.userId;
         const levelId = session.metadata.levelId;
 
-        await db
-          .collection("users")
-          .doc(userId)
-          .update({
-            [`purchasedLevels.${levelId}`]: true,
-            lastPurchase: new Date(),
-            activeLevel: levelId,
-          });
+        console.log(`🛒 Processing purchase for user ${userId}, level ${levelId}`);
 
-        console.log(`User ${userId} purchased level ${levelId} successfully`);
+        // Obtener el progress actual del usuario
+        const userProgressRef = doc(db, "userProgress", userId);
+        const userProgressSnap = await getDoc(userProgressRef);
+
+        if (!userProgressSnap.exists()) {
+          console.error(`User progress not found for ${userId}`);
+          return res.status(404).json({ error: "User progress not found" });
+        }
+
+        const userProgress = userProgressSnap.data();
+        const currentUnlockedLevels = userProgress.unlockedLevels || ["A1"];
+
+        // Verificar si el nivel ya está desbloqueado
+        if (currentUnlockedLevels.includes(levelId)) {
+          console.log(`ℹ️ Level ${levelId} already unlocked for user ${userId}`);
+          return res.json({ received: true, status: "already_unlocked" });
+        }
+
+        // Agregar el nuevo nivel a los desbloqueados
+        const updatedUnlockedLevels = [...currentUnlockedLevels, levelId];
+
+        // Actualizar el documento del usuario
+        await updateDoc(userProgressRef, {
+          unlockedLevels: updatedUnlockedLevels,
+          lastPurchase: new Date(),
+          [`purchasedLevels.${levelId}`]: true,
+        });
+
+        console.log(`✅ User ${userId} purchased level ${levelId} successfully`);
+        console.log(`🔓 Unlocked levels: ${updatedUnlockedLevels.join(', ')}`);
+
       } catch (error) {
-        console.error("Error updating user in Firebase:", error);
+        console.error("❌ Error updating user in Firebase:", error);
+        // Puedes decidir si quieres retornar error o solo loggear
+        return res.status(500).json({ error: "Failed to update user progress" });
       }
     }
 
     res.json({ received: true });
   }
 );
+
+// Verificar si un usuario tiene un nivel comprado
+app.get("/check-level-access/:userId/:levelId", async (req, res) => {
+  try {
+    const { userId, levelId } = req.params;
+
+    const userProgressRef = doc(db, "userProgress", userId);
+    const userProgressSnap = await getDoc(userProgressRef);
+
+    if (!userProgressSnap.exists()) {
+      return res.status(404).json({ hasAccess: false, error: "User not found" });
+    }
+
+    const userProgress = userProgressSnap.data();
+    const hasAccess = userProgress.unlockedLevels?.includes(levelId) || false;
+
+    res.json({ 
+      hasAccess, 
+      unlockedLevels: userProgress.unlockedLevels || ["A1"],
+      purchasedLevels: userProgress.purchasedLevels || {}
+    });
+
+  } catch (error) {
+    console.error("Error checking level access:", error);
+    res.status(500).json({ error: error.message });
+  }
+});
 
 // Verificar estado de pago
 app.get("/check-payment-status/:sessionId", async (req, res) => {
@@ -195,6 +247,31 @@ app.get("/check-payment-status/:sessionId", async (req, res) => {
     });
   } catch (error) {
     console.error("Error checking payment status:", error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Verificar acceso a múltiples niveles
+app.get("/check-level-access/:userId", async (req, res) => {
+  try {
+    const { userId } = req.params;
+
+    const userProgressRef = doc(db, "userProgress", userId);
+    const userProgressSnap = await getDoc(userProgressRef);
+
+    if (!userProgressSnap.exists()) {
+      return res.status(404).json({ error: "User not found" });
+    }
+
+    const userProgress = userProgressSnap.data();
+
+    res.json({ 
+      unlockedLevels: userProgress.unlockedLevels || ["A1"],
+      purchasedLevels: userProgress.purchasedLevels || {}
+    });
+
+  } catch (error) {
+    console.error("Error checking level access:", error);
     res.status(500).json({ error: error.message });
   }
 });

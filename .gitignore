@@ -1,0 +1,8 @@
+
+.env
+
+./script
+
+node_modules/
+
+script/

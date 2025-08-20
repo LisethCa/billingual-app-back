@@ -4,6 +4,16 @@ const stripe = require("stripe")(process.env.STRIPE_SECRET_KEY);
 const admin = require("firebase-admin");
 require("dotenv").config();
 
+const {
+  getFirestore,
+  doc,
+  getDoc,
+  updateDoc,
+  collection,
+  getDocs,
+  arrayUnion,
+} = require("firebase-admin/firestore");
+
 const app = express();
 app.use(cors());
 app.use(express.json());

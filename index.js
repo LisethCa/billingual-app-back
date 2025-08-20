@@ -4,16 +4,6 @@ const stripe = require("stripe")(process.env.STRIPE_SECRET_KEY);
 const admin = require("firebase-admin");
 require("dotenv").config();
 
-const {
-  getFirestore,
-  doc,
-  getDoc,
-  updateDoc,
-  collection,
-  getDocs,
-  arrayUnion,
-} = require("firebase-admin/firestore");
-
 const app = express();
 app.use(cors());
 app.use(express.json());
@@ -186,11 +176,11 @@ app.post(
     console.log(`✅ Webhook received: ${event.type}`);
 
     // Manejar el evento de checkout completado
+    // Webhook corregido
     if (event.type === "checkout.session.completed") {
       const session = event.data.object;
 
       try {
-        // Verificar que el pago fue exitoso
         if (session.payment_status !== "paid") {
           console.log(`ℹ️ Payment not completed for session: ${session.id}`);
           return res.json({ received: true, status: "not_paid" });
@@ -203,18 +193,17 @@ app.post(
           `🛒 Processing purchase for user ${userId}, level ${levelId}`
         );
 
-        // Obtener el usuario actual
-        const userProgressRef = doc(db, "userProgress", userId);
-        const userProgressSnap = await getDoc(userProgressRef);
+        // CORRECCIÓN: Sintaxis corregida
+        const userProgressRef = db.collection("userProgress").doc(userId);
+        const userProgressSnap = await userProgressRef.get();
 
-        if (!userProgressSnap.exists()) {
+        if (!userProgressSnap.exists) {
           console.error(`❌ User progress not found for ${userId}`);
           return res.status(404).json({ error: "User not found" });
         }
 
         const userProgress = userProgressSnap.data();
 
-        // Verificar si ya tiene el nivel
         if (userProgress.purchasedLevels?.[levelId]) {
           console.log(
             `ℹ️ Level ${levelId} already purchased for user ${userId}`
@@ -222,45 +211,25 @@ app.post(
           return res.json({ received: true, status: "already_purchased" });
         }
 
-        // Actualizar el usuario
+        // CORRECCIÓN: Usa FieldValue.arrayUnion
         const updateData = {
           [`purchasedLevels.${levelId}`]: true,
           lastPurchase: new Date(),
         };
 
-        // Solo agregar a unlockedLevels si no existe ya
         if (!userProgress.unlockedLevels?.includes(levelId)) {
-          updateData.unlockedLevels = arrayUnion(levelId);
+          updateData.unlockedLevels =
+            admin.firestore.FieldValue.arrayUnion(levelId);
         }
 
-        await updateDoc(userProgressRef, updateData);
+        // CORRECCIÓN: Sintaxis corregida
+        await userProgressRef.update(updateData);
 
         console.log(
           `✅ Purchase completed: User ${userId} -> Level ${levelId}`
         );
-
-        // Enviar email de confirmación (opcional)
-        try {
-          await sendPurchaseConfirmationEmail(
-            userId,
-            levelId,
-            session.amount_total / 100
-          );
-        } catch (emailError) {
-          console.error("Error sending email:", emailError);
-        }
       } catch (error) {
         console.error("❌ Error processing webhook:", error);
-
-        // Reintentar después de un delay
-        setTimeout(async () => {
-          try {
-            await retryFailedWebhook(event);
-          } catch (retryError) {
-            console.error("❌ Retry also failed:", retryError);
-          }
-        }, 5000);
-
         return res.status(500).json({ error: "Failed to process webhook" });
       }
     }
@@ -301,13 +270,12 @@ app.get("/check-level-access/:userId/:levelId", async (req, res) => {
   try {
     const { userId, levelId } = req.params;
 
-    const userProgressRef = doc(db, "userProgress", userId);
-    const userProgressSnap = await getDoc(userProgressRef);
+    // CORRECCIÓN: Usa la sintaxis de admin.firestore()
+    const userProgressRef = db.collection("userProgress").doc(userId);
+    const userProgressSnap = await userProgressRef.get();
 
-    if (!userProgressSnap.exists()) {
-      return res
-        .status(404)
-        .json({ hasAccess: false, error: "User not found" });
+    if (!userProgressSnap.exists) {
+      return res.status(404).json({ hasAccess: false, error: "User not found" });
     }
 
     const userProgress = userProgressSnap.data();
@@ -346,10 +314,11 @@ app.get("/check-level-access/:userId", async (req, res) => {
   try {
     const { userId } = req.params;
 
-    const userProgressRef = doc(db, "userProgress", userId);
-    const userProgressSnap = await getDoc(userProgressRef);
+    // CORRECCIÓN
+    const userProgressRef = db.collection("userProgress").doc(userId);
+    const userProgressSnap = await userProgressRef.get();
 
-    if (!userProgressSnap.exists()) {
+    if (!userProgressSnap.exists) {
       return res.status(404).json({ error: "User not found" });
     }
 

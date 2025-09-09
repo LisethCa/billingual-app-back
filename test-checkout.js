@@ -6,9 +6,9 @@ async function testPriceIDs() {
   console.log("🧪 Probando Price IDs...");
 
   const testPriceIDs = [
-    "price_1RyFaaIlL7CBuxtZG47D4jKY", // Reemplaza con tus price IDs reales
-    "price_1RyFb5IlL7CBuxtZUSHsM4fP",
-    "price_1RyFbHIlL7CBuxtZz1GG0zhv",
+    "price_1S3hprFHOc1l5YQOcaq3BCSI", // Reemplaza con tus price IDs reales
+    "price_1S3hpTFHOc1l5YQOZb80Ias7",
+    "price_1S3hnaFHOc1l5YQOAhXVaMy4",
   ];
 
   for (const priceId of testPriceIDs) {

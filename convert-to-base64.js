@@ -4,7 +4,7 @@ const path = require("path");
 
 const serviceAccountPath = path.join(
   __dirname,
-  "./script/bilingual-site-65404-firebase-adminsdk-fbsvc-c79e697c2a.json"
+  "./script/bilingualsite-ee6f8-firebase-adminsdk-fbsvc-c5303ad4e0.json"
 );
 
 try {

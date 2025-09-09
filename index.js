@@ -37,7 +37,7 @@ if (process.env.NODE_ENV === "production") {
   // Para desarrollo - desde archivo
   console.log("🔧 Modo desarrollo - cargando desde archivo");
   try {
-    serviceAccount = require("./script/bilingual-site-65404-firebase-adminsdk-fbsvc-c79e697c2a.json");
+    serviceAccount = require("./script/bilingualsite-ee6f8-firebase-adminsdk-fbsvc-c5303ad4e0.json");
   } catch (error) {
     console.error("❌ Error cargando archivo service account:", error.message);
     process.exit(1);
@@ -154,6 +154,35 @@ app.get("/verify-payment/:sessionId", async (req, res) => {
   }
 });
 
+// Agrega esto antes de las rutas principales
+app.get("/wake-up", async (req, res) => {
+  console.log("☀️ Backend awakened at:", new Date().toISOString());
+
+  try {
+    // Hacer una pequeña operación de Firestore para precalentar
+    const testRef = db.collection("wakeup").doc("test");
+    await testRef.set(
+      {
+        lastWakeup: new Date().toISOString(),
+      },
+      { merge: true }
+    );
+
+    res.json({
+      status: "awake",
+      timestamp: new Date().toISOString(),
+      message: "Backend and database prewarmed",
+    });
+  } catch (error) {
+    // Aún así responder aunque falle el precalentamiento de DB
+    res.json({
+      status: "awake",
+      timestamp: new Date().toISOString(),
+      message: "Backend awake (db prewarm failed)",
+    });
+  }
+});
+
 // Webhook mejorado con reintentos
 app.post(
   "/webhook",
@@ -265,7 +294,7 @@ async function retryFailedWebhook(event) {
   }
 }
 
-// Verificar si un usuario tiene un nivel comprado
+// Verificar si un usuario tiene un nivel comprado - CORREGIDO
 app.get("/check-level-access/:userId/:levelId", async (req, res) => {
   try {
     const { userId, levelId } = req.params;

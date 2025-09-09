@@ -63,9 +63,9 @@ console.log("✅ Firebase Admin inicializado correctamente");
 
 // Precios de los niveles (deberían coincidir con tus productos en Stripe)
 const LEVEL_PRICES = {
-  A1: "price_1RyFaaIlL7CBuxtZG47D4jKY",
-  A2: "price_1RyFb5IlL7CBuxtZUSHsM4fP",
-  B1: "price_1RyFbHIlL7CBuxtZz1GG0zhv",
+  A1: "price_1S3hprFHOc1l5YQOcaq3BCSI",
+  A2: "price_1S3hpTFHOc1l5YQOZb80Ias7",
+  B1: "price_1S3hnaFHOc1l5YQOAhXVaMy4",
 };
 
 // Crear sesión de checkout

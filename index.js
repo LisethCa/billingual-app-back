@@ -3,6 +3,13 @@ const cors = require("cors");
 const stripe = require("stripe")(process.env.STRIPE_SECRET_KEY);
 const admin = require("firebase-admin");
 require("dotenv").config();
+const path = require("path");
+const Groq = require("groq-sdk");
+const multer = require("multer");
+const fs = require("fs");
+
+const upload = multer({ dest: "uploads/" });
+const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
 
 const app = express();
 app.use(cors());
@@ -183,6 +190,43 @@ app.get("/wake-up", async (req, res) => {
   }
 });
 
+// audio
+
+app.post("/transcribe", upload.single("audio"), async (req, res) => {
+  let tempPath = null;
+  try {
+    if (!req.file) {
+      return res.status(400).json({ error: "No se recibió archivo" });
+    }
+
+    // RENOMBRAR EL ARCHIVO PARA QUE TENGA EXTENSIÓN (Groq es estricto con esto)
+    tempPath = req.file.path + ".m4a";
+    fs.renameSync(req.file.path, tempPath);
+
+    const transcription = await groq.audio.transcriptions.create({
+      file: fs.createReadStream(tempPath), // Enviamos el archivo con la extensión .m4a
+      model: "whisper-large-v3",
+      language: "en",
+    });
+
+    // Limpiar archivo renombrado
+    fs.unlinkSync(tempPath);
+
+    res.json({ text: transcription.text });
+  } catch (error) {
+    console.error("❌ Error en Groq:", error);
+
+    // Limpieza de emergencia
+    if (tempPath && fs.existsSync(tempPath)) fs.unlinkSync(tempPath);
+    if (req.file && fs.existsSync(req.file.path)) fs.unlinkSync(req.file.path);
+
+    res.status(500).json({
+      error: "Error al procesar el audio",
+      details: error.message,
+    });
+  }
+});
+
 // Webhook mejorado con reintentos
 app.post(
   "/webhook",
@@ -304,7 +348,9 @@ app.get("/check-level-access/:userId/:levelId", async (req, res) => {
     const userProgressSnap = await userProgressRef.get();
 
     if (!userProgressSnap.exists) {
-      return res.status(404).json({ hasAccess: false, error: "User not found" });
+      return res
+        .status(404)
+        .json({ hasAccess: false, error: "User not found" });
     }
 
     const userProgress = userProgressSnap.data();

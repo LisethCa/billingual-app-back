@@ -1,12 +1,14 @@
 const express = require("express");
 const cors = require("cors");
-const stripe = require("stripe")(process.env.STRIPE_SECRET_KEY);
 const admin = require("firebase-admin");
 require("dotenv").config();
 const path = require("path");
 const Groq = require("groq-sdk");
 const multer = require("multer");
 const fs = require("fs");
+
+const crypto = require("crypto");
+const { MercadoPagoConfig, Payment, Preference } = require("mercadopago");
 
 const upload = multer({ dest: "uploads/" });
 const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
@@ -33,7 +35,7 @@ if (process.env.NODE_ENV === "production") {
       console.log("🔄 Intentando cargar desde Base64...");
       const serviceAccountJSON = Buffer.from(
         process.env.FIREBASE_SERVICE_ACCOUNT_BASE64,
-        "base64"
+        "base64",
       ).toString("utf8");
       serviceAccount = JSON.parse(serviceAccountJSON);
     } else {
@@ -68,97 +70,9 @@ admin.initializeApp({
 const db = admin.firestore();
 console.log("✅ Firebase Admin inicializado correctamente");
 
-// Precios de los niveles (deberían coincidir con tus productos en Stripe)
-const LEVEL_PRICES = {
-  A1: "price_1S3hprFHOc1l5YQOcaq3BCSI",
-  A2: "price_1S3hpTFHOc1l5YQOZb80Ias7",
-  B1: "price_1S3hnaFHOc1l5YQOAhXVaMy4",
-};
-
-// Crear sesión de checkout
-app.post("/create-checkout-session", async (req, res) => {
-  try {
-    console.log("Received checkout request:", req.body);
-
-    const { levelId, userId, successUrl, cancelUrl } = req.body;
-
-    if (!levelId || !userId) {
-      return res.status(400).json({ error: "levelId and userId are required" });
-    }
-
-    const priceId = LEVEL_PRICES[levelId];
-    if (!priceId) {
-      return res.status(400).json({
-        error: `Invalid level ID: ${levelId}. Available levels: ${Object.keys(
-          LEVEL_PRICES
-        ).join(", ")}`,
-      });
-    }
-
-    // Verificar que el priceId sea válido (empiece con price_)
-    if (!priceId.startsWith("price_")) {
-      return res.status(400).json({
-        error: `Invalid price ID format for level ${levelId}. Expected 'price_xxx', got '${priceId}'`,
-      });
-    }
-
-    const session = await stripe.checkout.sessions.create({
-      payment_method_types: ["card"],
-      line_items: [
-        {
-          price: priceId,
-          quantity: 1,
-        },
-      ],
-      mode: "payment",
-      success_url:
-        successUrl ||
-        `${process.env.FRONTEND_URL}/payment-success?session_id={CHECKOUT_SESSION_ID}`,
-      cancel_url: cancelUrl || `${process.env.FRONTEND_URL}/payment-cancel`,
-      metadata: {
-        userId: userId,
-        levelId: levelId,
-      },
-    });
-
-    console.log("✅ Checkout session created:", session.id);
-    res.json({ sessionId: session.id });
-  } catch (error) {
-    console.error("❌ Error creating checkout session:", error);
-
-    // Dar mejor feedback sobre el error
-    if (error.type === "StripeInvalidRequestError") {
-      res.status(400).json({
-        error: "Invalid Stripe request",
-        details: error.message,
-        suggestion: "Check if the price ID exists and is active in Stripe",
-      });
-    } else {
-      res.status(500).json({
-        error: error.message,
-        details: "Check Stripe configuration",
-      });
-    }
-  }
-});
-
-// Endpoint para verificar estado de pago
-app.get("/verify-payment/:sessionId", async (req, res) => {
-  try {
-    const { sessionId } = req.params;
-    const session = await stripe.checkout.sessions.retrieve(sessionId);
-
-    res.json({
-      status: session.payment_status,
-      levelId: session.metadata.levelId,
-      userId: session.metadata.userId,
-      amount: session.amount_total / 100,
-      currency: session.currency,
-    });
-  } catch (error) {
-    console.error("Error verifying payment:", error);
-    res.status(500).json({ error: error.message });
-  }
+// Keep-alive liviano para el cron externo (cron-job.org): no toca Firestore
+app.get("/health", (req, res) => {
+  res.json({ status: "ok", uptime: Math.round(process.uptime()) });
 });
 
 // Agrega esto antes de las rutas principales
@@ -172,7 +86,7 @@ app.get("/wake-up", async (req, res) => {
       {
         lastWakeup: new Date().toISOString(),
       },
-      { merge: true }
+      { merge: true },
     );
 
     res.json({
@@ -227,117 +141,6 @@ app.post("/transcribe", upload.single("audio"), async (req, res) => {
   }
 });
 
-// Webhook mejorado con reintentos
-app.post(
-  "/webhook",
-  express.raw({ type: "application/json" }),
-  async (req, res) => {
-    const sig = req.headers["stripe-signature"];
-    let event;
-
-    try {
-      event = stripe.webhooks.constructEvent(
-        req.body,
-        sig,
-        process.env.STRIPE_WEBHOOK_SECRET
-      );
-    } catch (err) {
-      console.error("❌ Webhook signature verification failed:", err.message);
-      return res.status(400).send(`Webhook Error: ${err.message}`);
-    }
-
-    console.log(`✅ Webhook received: ${event.type}`);
-
-    // Manejar el evento de checkout completado
-    // Webhook corregido
-    if (event.type === "checkout.session.completed") {
-      const session = event.data.object;
-
-      try {
-        if (session.payment_status !== "paid") {
-          console.log(`ℹ️ Payment not completed for session: ${session.id}`);
-          return res.json({ received: true, status: "not_paid" });
-        }
-
-        const userId = session.metadata.userId;
-        const levelId = session.metadata.levelId;
-
-        console.log(
-          `🛒 Processing purchase for user ${userId}, level ${levelId}`
-        );
-
-        // CORRECCIÓN: Sintaxis corregida
-        const userProgressRef = db.collection("userProgress").doc(userId);
-        const userProgressSnap = await userProgressRef.get();
-
-        if (!userProgressSnap.exists) {
-          console.error(`❌ User progress not found for ${userId}`);
-          return res.status(404).json({ error: "User not found" });
-        }
-
-        const userProgress = userProgressSnap.data();
-
-        if (userProgress.purchasedLevels?.[levelId]) {
-          console.log(
-            `ℹ️ Level ${levelId} already purchased for user ${userId}`
-          );
-          return res.json({ received: true, status: "already_purchased" });
-        }
-
-        // CORRECCIÓN: Usa FieldValue.arrayUnion
-        const updateData = {
-          [`purchasedLevels.${levelId}`]: true,
-          lastPurchase: new Date(),
-        };
-
-        if (!userProgress.unlockedLevels?.includes(levelId)) {
-          updateData.unlockedLevels =
-            admin.firestore.FieldValue.arrayUnion(levelId);
-        }
-
-        // CORRECCIÓN: Sintaxis corregida
-        await userProgressRef.update(updateData);
-
-        console.log(
-          `✅ Purchase completed: User ${userId} -> Level ${levelId}`
-        );
-      } catch (error) {
-        console.error("❌ Error processing webhook:", error);
-        return res.status(500).json({ error: "Failed to process webhook" });
-      }
-    }
-
-    res.json({ received: true });
-  }
-);
-
-// Función para reintentar webhooks fallidos
-async function retryFailedWebhook(event) {
-  console.log("🔄 Retrying failed webhook...");
-
-  if (event.type === "checkout.session.completed") {
-    const session = event.data.object;
-    const userId = session.metadata.userId;
-    const levelId = session.metadata.levelId;
-
-    const userProgressRef = doc(db, "userProgress", userId);
-
-    const updateData = {
-      [`purchasedLevels.${levelId}`]: true,
-      lastPurchase: new Date(),
-    };
-
-    // Solo agregar a unlockedLevels si no existe ya
-    if (!userProgress.unlockedLevels?.includes(levelId)) {
-      updateData.unlockedLevels = arrayUnion(levelId);
-    }
-
-    await updateDoc(userProgressRef, updateData);
-
-    console.log("✅ Retry successful");
-  }
-}
-
 // Verificar si un usuario tiene un nivel comprado - CORREGIDO
 app.get("/check-level-access/:userId/:levelId", async (req, res) => {
   try {
@@ -367,23 +170,6 @@ app.get("/check-level-access/:userId/:levelId", async (req, res) => {
   }
 });
 
-// Verificar estado de pago
-app.get("/check-payment-status/:sessionId", async (req, res) => {
-  try {
-    const { sessionId } = req.params;
-    const session = await stripe.checkout.sessions.retrieve(sessionId);
-
-    res.json({
-      status: session.payment_status,
-      levelId: session.metadata.levelId,
-      userId: session.metadata.userId,
-    });
-  } catch (error) {
-    console.error("Error checking payment status:", error);
-    res.status(500).json({ error: error.message });
-  }
-});
-
 // Verificar acceso a múltiples niveles
 app.get("/check-level-access/:userId", async (req, res) => {
   try {
@@ -406,6 +192,296 @@ app.get("/check-level-access/:userId", async (req, res) => {
   } catch (error) {
     console.error("Error checking level access:", error);
     res.status(500).json({ error: error.message });
+  }
+});
+
+// ===================== MERCADO PAGO =====================
+
+const mpClient = new MercadoPagoConfig({
+  accessToken: process.env.MP_ACCESS_TOKEN, // TEST-... en pruebas, APP_USR-... en producción
+});
+
+const MP_CURRENCY = "COP";
+
+// Precios en dólares (lo que ve el usuario). Se cobran en COP convertidos con
+// la TRM del día. Sobreescribibles con PRICE_A1_USD / PRICE_A2_USD / PRICE_B1_USD.
+const LEVEL_PRICES_USD = {
+  A1: Number(process.env.PRICE_A1_USD) || 12,
+  A2: Number(process.env.PRICE_A2_USD) || 18,
+  B1: Number(process.env.PRICE_B1_USD) || 24, // PLACEHOLDER: B1 sin precio definido
+};
+
+// ===== Tasa USD -> COP =====
+// 1° TRM oficial (Superfinanciera, vía datos.gov.co). 2° open.er-api.com.
+// 3° última tasa obtenida. 4° USD_COP_FALLBACK (env).
+const FX_CACHE_MS = 6 * 60 * 60 * 1000;
+const FX_SOURCES = [
+  {
+    name: "TRM datos.gov.co",
+    url: "https://www.datos.gov.co/resource/32sa-8pi3.json?$order=vigenciadesde%20DESC&$limit=1",
+    parse: (data) => Number(data?.[0]?.valor),
+  },
+  {
+    name: "open.er-api.com",
+    url: "https://open.er-api.com/v6/latest/USD",
+    parse: (data) => Number(data?.rates?.COP),
+  },
+];
+let fxCache = { rate: null, source: null, fetchedAt: 0 };
+
+async function getUsdToCop() {
+  if (fxCache.rate && Date.now() - fxCache.fetchedAt < FX_CACHE_MS) {
+    return fxCache;
+  }
+
+  for (const source of FX_SOURCES) {
+    try {
+      const response = await fetch(source.url, {
+        signal: AbortSignal.timeout(5000),
+      });
+      if (!response.ok) continue;
+      const rate = source.parse(await response.json());
+      // Sanity check: descarta valores absurdos
+      if (rate > 1000 && rate < 20000) {
+        fxCache = { rate, source: source.name, fetchedAt: Date.now() };
+        return fxCache;
+      }
+    } catch (error) {
+      console.warn(`⚠️ Tasa USD/COP no disponible en ${source.name}:`, error.message);
+    }
+  }
+
+  if (fxCache.rate) return fxCache; // tasa vieja antes que nada
+
+  const fallback = Number(process.env.USD_COP_FALLBACK) || 3200;
+  return { rate: fallback, source: "fallback", fetchedAt: Date.now() };
+}
+
+// Redondea hacia arriba a la centena para un precio "limpio" en pesos
+const usdToCop = (usd, rate) => Math.ceil((usd * rate) / 100) * 100;
+
+// Mínimo aceptable en COP para un nivel, por si llega un external_reference
+// sin monto (pagos creados antes de este cambio)
+const MIN_USD_COP_RATE = 2000;
+
+// Verifica el ID token de Firebase enviado como "Authorization: Bearer <token>"
+async function requireFirebaseUser(req, res, next) {
+  const match = (req.headers.authorization || "").match(/^Bearer (.+)$/);
+  if (!match) {
+    return res.status(401).json({ error: "Falta token de autenticación" });
+  }
+  try {
+    req.user = await admin.auth().verifyIdToken(match[1]);
+    next();
+  } catch (error) {
+    return res.status(401).json({ error: "Token inválido o expirado" });
+  }
+}
+
+// Valida la firma x-signature de las notificaciones de MP.
+// Si MP_WEBHOOK_SECRET no está configurada, se omite (el pago igual se
+// re-consulta a la API de MP, así que no se confía en el body).
+function isValidMpSignature(req, dataId) {
+  const secret = process.env.MP_WEBHOOK_SECRET;
+  if (!secret) return true;
+
+  const signature = req.headers["x-signature"];
+  const requestId = req.headers["x-request-id"];
+  if (!signature || !dataId) return false;
+
+  const parts = Object.fromEntries(
+    signature.split(",").map((part) => part.trim().split("=")),
+  );
+  if (!parts.ts || !parts.v1) return false;
+
+  let manifest = `id:${String(dataId).toLowerCase()};`;
+  if (requestId) manifest += `request-id:${requestId};`;
+  manifest += `ts:${parts.ts};`;
+
+  const expected = crypto
+    .createHmac("sha256", secret)
+    .update(manifest)
+    .digest("hex");
+
+  return (
+    expected.length === parts.v1.length &&
+    crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(parts.v1))
+  );
+}
+
+// Consulta un pago en MP y, si está aprobado, desbloquea el nivel.
+// Idempotente: se puede llamar desde el webhook y desde /verify-payment.
+async function processMpPayment(paymentId) {
+  const payment = await new Payment(mpClient).get({ id: paymentId });
+
+  // external_reference = "uid:levelId:montoCOP" (lo arma el backend al crear la
+  // preferencia, el comprador no lo puede modificar)
+  const [userId, levelId, copAmount] = (payment.external_reference || "").split(
+    ":",
+  );
+  const result = { status: payment.status, levelId, userId };
+
+  if (payment.status !== "approved") return result;
+
+  // Se valida contra el monto fijado al crear la preferencia, no contra la
+  // tasa actual (puede haber cambiado entre la creación y el pago)
+  const usdPrice = LEVEL_PRICES_USD[levelId];
+  const expectedPrice = usdPrice
+    ? Math.max(Number(copAmount) || 0, usdPrice * MIN_USD_COP_RATE)
+    : 0;
+  if (
+    !userId ||
+    !expectedPrice ||
+    payment.currency_id !== MP_CURRENCY ||
+    payment.transaction_amount < expectedPrice
+  ) {
+    console.error("❌ Pago MP inconsistente:", {
+      paymentId,
+      external_reference: payment.external_reference,
+      amount: payment.transaction_amount,
+      currency: payment.currency_id,
+    });
+    return { ...result, status: "invalid" };
+  }
+
+  const paymentRef = db.collection("payments").doc(`mp_${payment.id}`);
+  const userProgressRef = db.collection("userProgress").doc(userId);
+
+  await db.runTransaction(async (tx) => {
+    const existing = await tx.get(paymentRef);
+    if (existing.exists) return;
+
+    tx.set(paymentRef, {
+      provider: "mercadopago",
+      paymentId: payment.id,
+      userId,
+      levelId,
+      amount: payment.transaction_amount,
+      currency: payment.currency_id,
+      status: payment.status,
+      liveMode: payment.live_mode,
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+    });
+    tx.set(
+      userProgressRef,
+      {
+        purchasedLevels: { [levelId]: true },
+        unlockedLevels: admin.firestore.FieldValue.arrayUnion(levelId),
+        lastPurchase: new Date(),
+      },
+      { merge: true },
+    );
+  });
+
+  console.log(`✅ Pago MP aprobado: User ${userId} -> Level ${levelId}`);
+  return result;
+}
+
+// Precios para mostrar en la app
+app.get("/level-prices", async (req, res) => {
+  const fx = await getUsdToCop();
+  const pricesCop = Object.fromEntries(
+    Object.entries(LEVEL_PRICES_USD).map(([level, usd]) => [
+      level,
+      usdToCop(usd, fx.rate),
+    ]),
+  );
+
+  res.json({
+    currency: "USD",
+    prices: LEVEL_PRICES_USD,
+    chargeCurrency: MP_CURRENCY,
+    chargePrices: pricesCop,
+    usdCopRate: fx.rate,
+    rateSource: fx.source,
+  });
+});
+
+// 1. Crear preferencia de Checkout Pro
+app.post("/create-preference", requireFirebaseUser, async (req, res) => {
+  try {
+    const { levelId } = req.body;
+    const userId = req.user.uid;
+    const usdPrice = LEVEL_PRICES_USD[levelId];
+
+    if (!usdPrice) {
+      return res.status(400).json({ error: `Nivel no válido: ${levelId}` });
+    }
+
+    const fx = await getUsdToCop();
+    const price = usdToCop(usdPrice, fx.rate);
+
+    const frontendUrl = (process.env.FRONTEND_URL || "").replace(/\/$/, "");
+    const backendUrl = (process.env.BACKEND_URL || "").replace(/\/$/, "");
+
+    const body = {
+      items: [
+        {
+          id: levelId,
+          title: `Curso de Inglés Nivel ${levelId}`,
+          quantity: 1,
+          unit_price: price,
+          currency_id: MP_CURRENCY,
+        },
+      ],
+      payer: req.user.email ? { email: req.user.email } : undefined,
+      external_reference: `${userId}:${levelId}:${price}`,
+      back_urls: {
+        success: `${frontendUrl}/payment-success`,
+        pending: `${frontendUrl}/payment-success`,
+        failure: `${frontendUrl}/payment-cancel`,
+      },
+      statement_descriptor: "BILINGUALSITE",
+    };
+
+    // MP solo acepta auto_return / notification_url con URLs públicas https
+    if (frontendUrl.startsWith("https://")) body.auto_return = "approved";
+    if (backendUrl.startsWith("https://")) {
+      body.notification_url = `${backendUrl}/mp-webhook`;
+    }
+
+    const preference = await new Preference(mpClient).create({ body });
+
+    res.json({
+      id: preference.id,
+      init_point: preference.init_point,
+      sandbox_init_point: preference.sandbox_init_point,
+    });
+  } catch (error) {
+    console.error("❌ MP Error:", error);
+    res.status(500).json({ error: "No se pudo crear el pago" });
+  }
+});
+
+// 2. Verificar pago al volver del checkout (payment_id viene en la URL)
+app.get("/verify-payment/:paymentId", async (req, res) => {
+  try {
+    const result = await processMpPayment(req.params.paymentId);
+    res.json({ status: result.status, levelId: result.levelId });
+  } catch (error) {
+    console.error("❌ Error verificando pago MP:", error);
+    res.status(500).json({ error: "No se pudo verificar el pago" });
+  }
+});
+
+// 3. Webhook (notificación de pago)
+app.post("/mp-webhook", async (req, res) => {
+  const type = req.body?.type || req.query.type || req.query.topic;
+  const dataId = req.query["data.id"] || req.body?.data?.id || req.query.id;
+
+  if (!isValidMpSignature(req, dataId)) {
+    console.warn("⚠️ Webhook MP con firma inválida");
+    return res.sendStatus(401);
+  }
+
+  if (type !== "payment" || !dataId) return res.sendStatus(200);
+
+  try {
+    await processMpPayment(dataId);
+    res.sendStatus(200);
+  } catch (error) {
+    console.error("❌ Webhook MP Error:", error);
+    res.sendStatus(500); // MP reintenta
   }
 });
 

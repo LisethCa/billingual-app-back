@@ -208,7 +208,8 @@ const MP_CURRENCY = "COP";
 const LEVEL_PRICES_USD = {
   A1: Number(process.env.PRICE_A1_USD) || 12,
   A2: Number(process.env.PRICE_A2_USD) || 18,
-  B1: Number(process.env.PRICE_B1_USD) || 24, // PLACEHOLDER: B1 sin precio definido
+  // B1 "Próximamente": sin contenido, no está a la venta. Para habilitarlo,
+  // agregar B1: Number(process.env.PRICE_B1_USD) y quitar comingSoon en la app.
 };
 
 // ===== Tasa USD -> COP =====
@@ -377,6 +378,11 @@ async function processMpPayment(paymentId) {
   return result;
 }
 
+// Pago simulado (testers): solo activo con ENABLE_SIMULATED_PAYMENTS=true.
+// Desactivar al lanzar.
+const SIMULATED_PAYMENTS_ENABLED =
+  process.env.ENABLE_SIMULATED_PAYMENTS === "true";
+
 // Precios para mostrar en la app
 app.get("/level-prices", async (req, res) => {
   const fx = await getUsdToCop();
@@ -394,7 +400,51 @@ app.get("/level-prices", async (req, res) => {
     chargePrices: pricesCop,
     usdCopRate: fx.rate,
     rateSource: fx.source,
+    simulatedPaymentsEnabled: SIMULATED_PAYMENTS_ENABLED,
   });
+});
+
+// Pago simulado para testers: desbloquea el nivel sin pasar por MP.
+app.post("/simulate-purchase", requireFirebaseUser, async (req, res) => {
+  if (!SIMULATED_PAYMENTS_ENABLED) {
+    return res.status(404).json({ error: "Pago simulado no disponible" });
+  }
+
+  const { levelId } = req.body;
+  const userId = req.user.uid;
+
+  if (!LEVEL_PRICES_USD[levelId]) {
+    return res.status(400).json({ error: `Nivel no válido: ${levelId}` });
+  }
+
+  try {
+    const batch = db.batch();
+    batch.set(db.collection("payments").doc(`sim_${userId}_${levelId}`), {
+      provider: "simulated",
+      userId,
+      levelId,
+      amount: 0,
+      status: "approved",
+      liveMode: false,
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+    });
+    batch.set(
+      db.collection("userProgress").doc(userId),
+      {
+        purchasedLevels: { [levelId]: true },
+        unlockedLevels: admin.firestore.FieldValue.arrayUnion(levelId),
+        lastPurchase: new Date(),
+      },
+      { merge: true },
+    );
+    await batch.commit();
+
+    console.log(`🧪 Pago simulado: User ${userId} -> Level ${levelId}`);
+    res.json({ success: true, levelId });
+  } catch (error) {
+    console.error("❌ Error en pago simulado:", error);
+    res.status(500).json({ error: "No se pudo simular el pago" });
+  }
 });
 
 // 1. Crear preferencia de Checkout Pro

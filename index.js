@@ -114,7 +114,10 @@ app.post("/transcribe", upload.single("audio"), async (req, res) => {
     }
 
     // RENOMBRAR EL ARCHIVO PARA QUE TENGA EXTENSIÓN (Groq es estricto con esto)
-    tempPath = req.file.path + ".m4a";
+    // Se respeta la del archivo subido: Chrome graba webm, Safari mp4/m4a, Android m4a.
+    const ext = (path.extname(req.file.originalname || "").slice(1) || "m4a").toLowerCase();
+    const allowed = ["flac", "mp3", "mp4", "mpeg", "mpga", "m4a", "ogg", "opus", "wav", "webm"];
+    tempPath = `${req.file.path}.${allowed.includes(ext) ? ext : "m4a"}`;
     fs.renameSync(req.file.path, tempPath);
 
     const transcription = await groq.audio.transcriptions.create({

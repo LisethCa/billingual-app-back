@@ -381,11 +381,6 @@ async function processMpPayment(paymentId) {
   return result;
 }
 
-// Pago simulado (testers): solo activo con ENABLE_SIMULATED_PAYMENTS=true.
-// Desactivar al lanzar.
-const SIMULATED_PAYMENTS_ENABLED =
-  process.env.ENABLE_SIMULATED_PAYMENTS === "true";
-
 // Precios para mostrar en la app
 app.get("/level-prices", async (req, res) => {
   const fx = await getUsdToCop();
@@ -403,50 +398,89 @@ app.get("/level-prices", async (req, res) => {
     chargePrices: pricesCop,
     usdCopRate: fx.rate,
     rateSource: fx.source,
-    simulatedPaymentsEnabled: SIMULATED_PAYMENTS_ENABLED,
   });
 });
 
-// Pago simulado para testers: desbloquea el nivel sin pasar por MP.
-app.post("/simulate-purchase", requireFirebaseUser, async (req, res) => {
-  if (!SIMULATED_PAYMENTS_ENABLED) {
-    return res.status(404).json({ error: "Pago simulado no disponible" });
-  }
-
+// Cupones de 100%: desbloquean el nivel sin pasar por MP.
+// Doc coupons/<CÓDIGO EN MAYÚSCULAS>: { levels: ["A1", "A2"], maxUses, uses, active, expiresAt? }.
+// Cada canje (usuario + nivel) consume un uso; un usuario no repite el cupón en el mismo nivel.
+app.post("/redeem-coupon", requireFirebaseUser, async (req, res) => {
+  const code = String(req.body.code || "").trim().toUpperCase();
   const { levelId } = req.body;
   const userId = req.user.uid;
 
   if (!LEVEL_PRICES_USD[levelId]) {
     return res.status(400).json({ error: `Nivel no válido: ${levelId}` });
   }
+  if (!code || code.includes("/")) {
+    return res.status(400).json({ error: "Cupón no válido" });
+  }
+
+  const couponRef = db.collection("coupons").doc(code);
+  const redemptionRef = couponRef
+    .collection("redemptions")
+    .doc(`${userId}_${levelId}`);
+  const userProgressRef = db.collection("userProgress").doc(userId);
 
   try {
-    const batch = db.batch();
-    batch.set(db.collection("payments").doc(`sim_${userId}_${levelId}`), {
-      provider: "simulated",
-      userId,
-      levelId,
-      amount: 0,
-      status: "approved",
-      liveMode: false,
-      createdAt: admin.firestore.FieldValue.serverTimestamp(),
-    });
-    batch.set(
-      db.collection("userProgress").doc(userId),
-      {
-        purchasedLevels: { [levelId]: true },
-        unlockedLevels: admin.firestore.FieldValue.arrayUnion(levelId),
-        lastPurchase: new Date(),
-      },
-      { merge: true },
-    );
-    await batch.commit();
+    await db.runTransaction(async (tx) => {
+      const [coupon, redemption, progress] = await Promise.all([
+        tx.get(couponRef),
+        tx.get(redemptionRef),
+        tx.get(userProgressRef),
+      ]);
+      const data = coupon.data();
 
-    console.log(`🧪 Pago simulado: User ${userId} -> Level ${levelId}`);
+      const fail = (status, message) => {
+        throw Object.assign(new Error(message), { status });
+      };
+      if (!coupon.exists || data.active === false) fail(404, "Cupón no válido");
+      if (data.expiresAt && data.expiresAt.toMillis() < Date.now()) {
+        fail(410, "Este cupón venció");
+      }
+      if (!(data.levels || []).includes(levelId)) {
+        fail(400, `Este cupón no aplica al nivel ${levelId}`);
+      }
+      if (progress.data()?.purchasedLevels?.[levelId]) {
+        fail(409, `Ya tienes el nivel ${levelId}`);
+      }
+      if (redemption.exists) fail(409, "Ya usaste este cupón en este nivel");
+      if ((data.uses || 0) >= data.maxUses) fail(410, "Este cupón ya se agotó");
+
+      tx.update(couponRef, { uses: admin.firestore.FieldValue.increment(1) });
+      tx.set(redemptionRef, {
+        userId,
+        levelId,
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      });
+      tx.set(db.collection("payments").doc(`coupon_${code}_${userId}_${levelId}`), {
+        provider: "coupon",
+        coupon: code,
+        userId,
+        levelId,
+        amount: 0,
+        status: "approved",
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      });
+      tx.set(
+        userProgressRef,
+        {
+          purchasedLevels: { [levelId]: true },
+          unlockedLevels: admin.firestore.FieldValue.arrayUnion(levelId),
+          lastPurchase: new Date(),
+        },
+        { merge: true },
+      );
+    });
+
+    console.log(`🎟️ Cupón ${code}: User ${userId} -> Level ${levelId}`);
     res.json({ success: true, levelId });
   } catch (error) {
-    console.error("❌ Error en pago simulado:", error);
-    res.status(500).json({ error: "No se pudo simular el pago" });
+    if (error.status) {
+      return res.status(error.status).json({ error: error.message });
+    }
+    console.error("❌ Error canjeando cupón:", error);
+    res.status(500).json({ error: "No se pudo aplicar el cupón" });
   }
 });
 

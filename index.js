@@ -370,6 +370,7 @@ async function processMpPayment(paymentId) {
       userProgressRef,
       {
         purchasedLevels: { [levelId]: true },
+        purchasedAt: { [levelId]: admin.firestore.FieldValue.serverTimestamp() },
         unlockedLevels: admin.firestore.FieldValue.arrayUnion(levelId),
         lastPurchase: new Date(),
       },
@@ -466,6 +467,7 @@ app.post("/redeem-coupon", requireFirebaseUser, async (req, res) => {
         userProgressRef,
         {
           purchasedLevels: { [levelId]: true },
+          purchasedAt: { [levelId]: admin.firestore.FieldValue.serverTimestamp() },
           unlockedLevels: admin.firestore.FieldValue.arrayUnion(levelId),
           lastPurchase: new Date(),
         },
